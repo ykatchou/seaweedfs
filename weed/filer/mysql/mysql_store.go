@@ -52,11 +52,14 @@ func (store *MysqlStore) Initialize(configuration util.Configuration, prefix str
 		configuration.GetString(prefix+"ca_crt"),
 		configuration.GetString(prefix+"client_crt"),
 		configuration.GetString(prefix+"client_key"),
+		configuration.GetBool(prefix+"tls_insecure_skip_verify"),
+		configuration.GetString(prefix+"tls_server_name"),
 	)
 }
 
 func (store *MysqlStore) initialize(dsn string, upsertQuery string, enableUpsert bool, user, password, hostname string, port int, database string, maxIdle, maxOpen,
-	maxLifetimeSeconds int, interpolateParams bool, enableTls bool, caCrtDir string, clientCrtDir string, clientKeyDir string) (err error) {
+	maxLifetimeSeconds int, interpolateParams bool, enableTls bool, caCrtDir string, clientCrtDir string, clientKeyDir string,
+	tlsInsecureSkipVerify bool, tlsServerName string) (err error) {
 
 	store.SupportBucketTable = false
 	if !enableUpsert {
@@ -82,27 +85,35 @@ func (store *MysqlStore) initialize(dsn string, upsertQuery string, enableUpsert
 	}
 
 	if enableTls {
-		rootCertPool := x509.NewCertPool()
-		pem, err := os.ReadFile(caCrtDir)
-		if err != nil {
-			return err
-		}
-		if ok := rootCertPool.AppendCertsFromPEM(pem); !ok {
-			return fmt.Errorf("failed to append root certificate")
-		}
-
-		clientCert := make([]tls.Certificate, 0)
-		if cert, err := tls.LoadX509KeyPair(clientCrtDir, clientKeyDir); err == nil {
-			clientCert = append(clientCert, cert)
-		}
-
 		tlsConfig := &tls.Config{
-			RootCAs:      rootCertPool,
-			Certificates: clientCert,
-			MinVersion:   tls.VersionTLS12,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: tlsInsecureSkipVerify,
+			ServerName:         tlsServerName,
 		}
-		err = mysql.RegisterTLSConfig("mysql-tls", tlsConfig)
-		if err != nil {
+
+		if caCrtDir != "" {
+			rootCertPool := x509.NewCertPool()
+			pem, err := os.ReadFile(caCrtDir)
+			if err != nil {
+				return fmt.Errorf("read ca_crt %s: %w", caCrtDir, err)
+			}
+			if ok := rootCertPool.AppendCertsFromPEM(pem); !ok {
+				return fmt.Errorf("failed to append root certificate from %s", caCrtDir)
+			}
+			tlsConfig.RootCAs = rootCertPool
+		} else if !tlsInsecureSkipVerify {
+			return fmt.Errorf("mysql tls enabled but ca_crt is empty; set ca_crt or tls_insecure_skip_verify=true")
+		}
+
+		if clientCrtDir != "" || clientKeyDir != "" {
+			cert, err := tls.LoadX509KeyPair(clientCrtDir, clientKeyDir)
+			if err != nil {
+				return fmt.Errorf("load mysql client keypair (crt=%s key=%s): %w", clientCrtDir, clientKeyDir, err)
+			}
+			tlsConfig.Certificates = []tls.Certificate{cert}
+		}
+
+		if err = mysql.RegisterTLSConfig("mysql-tls", tlsConfig); err != nil {
 			return err
 		}
 	}
